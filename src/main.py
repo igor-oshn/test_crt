@@ -28,7 +28,9 @@ def create_city(city: str = Query(description="Название города", d
 @app.post('/get-cities/', summary='Get Cities')
 def cities_list(q: str = Query(description="Название города", default=None)):
     """
-    Получение списка городов и поиск по названию города
+    Получение списка городов
+    Фильтры:
+    - поиск по названию города
     """
     if q:
         cities = Session().query(City).filter(City.name.contains(q))
@@ -39,11 +41,19 @@ def cities_list(q: str = Query(description="Название города", defa
 
 
 @app.post('/users-list/', summary='')
-def users_list():
+def users_list(min_age: int = None, max_age: int = None):
     """
     Список пользователей
+    Фильтры:
+    - мин./макс. возраст
     """
-    users = Session().query(User).all()
+    users = Session().query(User)
+    if min_age:
+        users = users.filter(User.age >= min_age)
+    if max_age:
+        users = users.filter(User.age <= max_age)
+    if not min_age and not max_age:
+        users = users.all()
     return [{
         'id': user.id,
         'name': user.name,
