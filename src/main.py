@@ -1,21 +1,33 @@
 import datetime as dt
-from fastapi import FastAPI, HTTPException, Query
-from database import engine, Session, Base, City, User, Picnic, PicnicRegistration
+from fastapi import FastAPI, HTTPException, Query, Depends
+from database import engine, Session, Base
+from models import City, User, Picnic, PicnicRegistration
 from external_requests import CheckCityExisting, GetWeatherRequest
-from models import RegisterUserRequest, UserModel
+from pydantic.types import conint
+from schemas import RegisterUserRequest, UserModel, PicnicRegistrationModel, PicnicModel
+import crud
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
 
-@app.get('/create-city/', summary='Create City', description='Создание города по его названию')
-def create_city(city: str = Query(description="Название города", default=None)):
-    if city is None:
-        raise HTTPException(status_code=400, detail='Параметр city должен быть указан')
+# Dependency
+def get_db():
+    db = Session()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.post('/cities/', summary='Create City', description='Создание города по его названию')
+def create_city(city: str = Query(..., description="Название города"), db: Session = Depends(get_db)):
     check = CheckCityExisting()
     if not check.check_existing(city):
         raise HTTPException(status_code=400, detail='Параметр city должен быть существующим городом')
 
-    city_object = Session().query(City).filter(City.name == city.capitalize()).first()
+    city_object = db.query(City).filter(City.name == city.capitalize()).first()
     if city_object is None:
         city_object = City(name=city.capitalize())
         s = Session()
@@ -25,35 +37,37 @@ def create_city(city: str = Query(description="Название города", d
     return {'id': city_object.id, 'name': city_object.name, 'weather': city_object.weather}
 
 
-@app.post('/get-cities/', summary='Get Cities')
-def cities_list(q: str = Query(description="Название города", default=None)):
+@app.get('/cities/', summary='Get Cities')
+def cities_list(q: str = Query(description="Название города", default=None), db: Session = Depends(get_db)):
     """
     Получение списка городов
+
     Фильтры:
     - поиск по названию города
     """
     if q:
-        cities = Session().query(City).filter(City.name.contains(q))
+        cities = db.query(City).filter(City.name.contains(q))
     else:
-        cities = Session().query(City).all()
+        cities = db.query(City).all()
 
     return [{'id': city.id, 'name': city.name, 'weather': city.weather} for city in cities]
 
 
-@app.post('/users-list/', summary='')
-def users_list(min_age: int = None, max_age: int = None):
+@app.get('/users/', summary='Get Users')
+def users_list(min_age: conint(ge=0, le=120) = Query(default=None, description='Минимальный возраст', ),
+               max_age: conint(ge=0, le=120) = Query(default=None, description='Максимальный возраст'),
+               db: Session = Depends(get_db)):
     """
     Список пользователей
+
     Фильтры:
     - мин./макс. возраст
     """
-    users = Session().query(User)
+    users = db.query(User)
     if min_age:
         users = users.filter(User.age >= min_age)
     if max_age:
         users = users.filter(User.age <= max_age)
-    if not min_age and not max_age:
-        users = users.all()
     return [{
         'id': user.id,
         'name': user.name,
@@ -62,34 +76,31 @@ def users_list(min_age: int = None, max_age: int = None):
     } for user in users]
 
 
-@app.post('/register-user/', summary='CreateUser', response_model=UserModel)
-def register_user(user: RegisterUserRequest):
+@app.post('/users/', summary='Create User', response_model=UserModel)
+def register_user(user: RegisterUserRequest, db: Session = Depends(get_db)):
     """
     Регистрация пользователя
     """
-    user_object = User(**user.dict())
-    s = Session()
-    s.add(user_object)
-    s.commit()
-
-    return UserModel.from_orm(user_object)
+    user_obj = crud.create_user(db, user)
+    return user_obj
 
 
-@app.get('/all-picnics/', summary='All Picnics', tags=['picnic'])
-def all_picnics(datetime: dt.datetime = Query(default=None, description='Время пикника (по умолчанию не задано)'),
-                past: bool = Query(default=True, description='Включая уже прошедшие пикники')):
+@app.get('/picnics/', summary='Get Picnics', tags=['picnic'])
+def picnics_list(datetime: dt.datetime = Query(default=None, description='Время пикника (по умолчанию не задано)'),
+                past: bool = Query(default=True, description='Включая уже прошедшие пикники'),
+                db: Session = Depends(get_db)):
     """
     Список всех пикников
     """
-    picnics = Session().query(Picnic)
+    picnics = db.query(Picnic)
     if datetime is not None:
         picnics = picnics.filter(Picnic.time == datetime)
     if not past:
+        print(dt.datetime.now())
         picnics = picnics.filter(Picnic.time >= dt.datetime.now())
-
     return [{
         'id': pic.id,
-        'city': Session().query(City).filter(City.id == pic.id).first().name,
+        'city': pic.city.name,
         'time': pic.time,
         'users': [
             {
@@ -98,33 +109,45 @@ def all_picnics(datetime: dt.datetime = Query(default=None, description='Вре�
                 'surname': pr.user.surname,
                 'age': pr.user.age,
             }
-            for pr in Session().query(PicnicRegistration).filter(PicnicRegistration.picnic_id == pic.id)],
+            for pr in db.query(PicnicRegistration).filter(PicnicRegistration.picnic_id == pic.id)],
     } for pic in picnics]
 
 
-@app.get('/picnic-add/', summary='Picnic Add', tags=['picnic'])
-def picnic_add(city_id: int = None, datetime: dt.datetime = None):
+@app.post('/picnics/', summary='Create Picnic', tags=['picnic'])
+def picnic_add(pic: PicnicModel, db: Session = Depends(get_db)):
     """
     Добавление пикника
     """
-    p = Picnic(city_id=city_id, time=datetime)
-    s = Session()
-    s.add(p)
-    s.commit()
+    if not crud.get_city(db, pic.city_id):
+        raise HTTPException(status_code=400, detail=f'Город id:{pic.city_id} не найден')
+    p = crud.create_picnic(db, pic)
 
     return {
         'id': p.id,
-        'city': Session().query(City).filter(City.id == p.city_id).first().name,
+        'city': p.city.name,
         'time': p.time,
     }
 
 
-@app.get('/picnic-register/', summary='Picnic Registration', tags=['picnic'])
-def register_to_picnic(*_, **__,):
+@app.post('/picnic-register/', summary='Create Picnic Registration', tags=['picnic'])
+def picnic_register(pic_reg: PicnicRegistrationModel, db: Session = Depends(get_db)):
     """
     Регистрация пользователя на пикник
-    (Этот эндпойнт необходимо реализовать в процессе выполнения тестового задания)
     """
-    # TODO: Сделать логику
-    return ...
 
+    if not crud.check_unique_pic_reg(db, pic_reg.user_id, pic_reg.picnic_id):
+        raise HTTPException(status_code=400, detail=f'Пользователь id:{pic_reg.user_id} уже добавлен на пикник')
+
+    if not crud.get_user(db, pic_reg.user_id):
+        raise HTTPException(status_code=400, detail=f'Пользователь id:{pic_reg.user_id} не найден')
+
+    if not crud.get_picnic(db, pic_reg.picnic_id):
+        raise HTTPException(status_code=400, detail=f'Пикник id:{pic_reg.picnic_id} не найден')
+
+    pr = crud.create_picnic_register(db, pic_reg)
+
+    return {
+        'id': pr.id,
+        'picnic': pr.picnic.id,
+        'user': pr.user.name,
+    }
