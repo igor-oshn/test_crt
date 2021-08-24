@@ -1,13 +1,28 @@
 import datetime as dt
+import logging
+import random
+import string
+import time
+from typing import List
+from urllib.request import Request
+
 from fastapi import FastAPI, HTTPException, Query, Depends
 from database import engine, Session, Base
 from models import City, User, Picnic, PicnicRegistration
-from external_requests import CheckCityExisting, GetWeatherRequest
+from external_requests import GetWeatherRequest
 from pydantic.types import conint
-from schemas import RegisterUserRequest, UserModel, PicnicRegistrationModel, PicnicModel
+from schemas import CityModel, CityModelResponse, RegisterUserRequest, UserModel, PicnicRegistrationModel, PicnicModel,\
+                    PicnicModelResponse, PicnicRegistrationModelResponse
 import crud
 
 Base.metadata.create_all(bind=engine)
+
+# setup loggers
+logging.config.fileConfig('logging.conf', disable_existing_loggers=False)
+
+# get root logger
+logger = logging.getLogger(__name__)  # the __name__ resolve to "main" since we are at the root of the project.
+                                      # This will get the root logger since no logger in the configuration has this name.
 
 app = FastAPI()
 
@@ -21,23 +36,36 @@ def get_db():
         db.close()
 
 
-@app.post('/cities/', summary='Create City', description='Создание города по его названию')
-def create_city(city: str = Query(..., description="Название города"), db: Session = Depends(get_db)):
-    check = CheckCityExisting()
-    if not check.check_existing(city):
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    idem = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    logger.info(f"rid={idem} start request path={request.url.path}")
+    start_time = time.time()
+
+    response = await call_next(request)
+
+    process_time = (time.time() - start_time) * 1000
+    formatted_process_time = '{0:.2f}'.format(process_time)
+    logger.info(f"rid={idem} completed_in={formatted_process_time}ms status_code={response.status_code}")
+
+    return response
+
+
+@app.post('/cities/', summary='Create City', description='Создание города по его названию', tags=['cities'],
+          response_model=CityModelResponse)
+def create_city(city: CityModel, db: Session = Depends(get_db)):
+    check = GetWeatherRequest()
+    if not check.check_existing(city.name):
         raise HTTPException(status_code=400, detail='Параметр city должен быть существующим городом')
 
-    city_object = db.query(City).filter(City.name == city.capitalize()).first()
+    city_object = db.query(City).filter(City.name == city.name.capitalize()).first()
     if city_object is None:
-        city_object = City(name=city.capitalize())
-        s = Session()
-        s.add(city_object)
-        s.commit()
-
+        city_object = crud.create_city(db, city.name)
     return {'id': city_object.id, 'name': city_object.name, 'weather': city_object.weather}
 
 
-@app.get('/cities/', summary='Get Cities')
+@app.get('/cities/', summary='Get Cities', description='Получение списка городов',
+         tags=['cities'], response_model=List[CityModelResponse])
 def cities_list(q: str = Query(description="Название города", default=None), db: Session = Depends(get_db)):
     """
     Получение списка городов
@@ -53,7 +81,8 @@ def cities_list(q: str = Query(description="Название города", defa
     return [{'id': city.id, 'name': city.name, 'weather': city.weather} for city in cities]
 
 
-@app.get('/users/', summary='Get Users')
+@app.get('/users/', summary='Get Users', tags=['users'], description='Получение списка пользователей',
+         response_model=List[UserModel])
 def users_list(min_age: conint(ge=0, le=120) = Query(default=None, description='Минимальный возраст', ),
                max_age: conint(ge=0, le=120) = Query(default=None, description='Максимальный возраст'),
                db: Session = Depends(get_db)):
@@ -76,19 +105,26 @@ def users_list(min_age: conint(ge=0, le=120) = Query(default=None, description='
     } for user in users]
 
 
-@app.post('/users/', summary='Create User', response_model=UserModel)
+@app.post('/users/', summary='Create User', tags=['users'], description='Создание пользователя',
+          response_model=UserModel)
 def register_user(user: RegisterUserRequest, db: Session = Depends(get_db)):
     """
     Регистрация пользователя
     """
     user_obj = crud.create_user(db, user)
-    return user_obj
+    return {
+        'id': user_obj.id,
+        'name': user_obj.name,
+        'surname': user_obj.surname,
+        'age': user_obj.age,
+    }
 
 
-@app.get('/picnics/', summary='Get Picnics', tags=['picnic'])
+@app.get('/picnics/', summary='Get Picnics', tags=['picnics'], description='Получение списка пикников',
+         response_model=List[PicnicModelResponse])
 def picnics_list(datetime: dt.datetime = Query(default=None, description='Время пикника (по умолчанию не задано)'),
-                past: bool = Query(default=True, description='Включая уже прошедшие пикники'),
-                db: Session = Depends(get_db)):
+                 past: bool = Query(default=True, description='Включая уже прошедшие пикники'),
+                 db: Session = Depends(get_db)):
     """
     Список всех пикников
     """
@@ -113,8 +149,9 @@ def picnics_list(datetime: dt.datetime = Query(default=None, description='Вре
     } for pic in picnics]
 
 
-@app.post('/picnics/', summary='Create Picnic', tags=['picnic'])
-def picnic_add(pic: PicnicModel, db: Session = Depends(get_db)):
+@app.post('/picnics/', summary='Create Picnic', tags=['picnics'], description='Создание пикника',
+          response_model=PicnicModelResponse)
+def create_picnic(pic: PicnicModel, db: Session = Depends(get_db)):
     """
     Добавление пикника
     """
@@ -126,10 +163,13 @@ def picnic_add(pic: PicnicModel, db: Session = Depends(get_db)):
         'id': p.id,
         'city': p.city.name,
         'time': p.time,
+        'user': p.users
     }
 
 
-@app.post('/picnic-register/', summary='Create Picnic Registration', tags=['picnic'])
+@app.post('/picnic-register/', summary='Create Picnic Registration', tags=['picnic-register'],
+          description='Регистрация пользователя на пикник',
+          response_model=PicnicRegistrationModelResponse)
 def picnic_register(pic_reg: PicnicRegistrationModel, db: Session = Depends(get_db)):
     """
     Регистрация пользователя на пикник
@@ -148,6 +188,6 @@ def picnic_register(pic_reg: PicnicRegistrationModel, db: Session = Depends(get_
 
     return {
         'id': pr.id,
-        'picnic': pr.picnic.id,
-        'user': pr.user.name,
+        'picnic': pr.picnic,
+        'user': pr.user,
     }

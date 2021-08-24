@@ -20,6 +20,21 @@ class UserModel(BaseModel):
         orm_mode = True
 
 
+class CityModel(BaseModel):
+    name: str
+
+    class Config:
+        orm_mode = True
+
+class CityModelResponse(BaseModel):
+    id: int
+    name: str
+    weather: float
+
+    class Config:
+        orm_mode = True
+
+
 class PicnicModel(BaseModel):
     city_id: int
     time: datetime.datetime
@@ -28,10 +43,11 @@ class PicnicModel(BaseModel):
         orm_mode = True
 
 
-class PicnicRegistrationResponseModel(BaseModel):
+class PicnicModelResponse(BaseModel):
     id: int
-    user: UserModel
-    picnic: PicnicModel
+    city: str
+    time: datetime.datetime
+    users: Optional[List[UserModel]]
 
     class Config:
         orm_mode = True
@@ -40,6 +56,15 @@ class PicnicRegistrationResponseModel(BaseModel):
 class PicnicRegistrationModel(BaseModel):
     user_id: int
     picnic_id: int
+
+    class Config:
+        orm_mode = True
+
+
+class PicnicRegistrationModelResponse(BaseModel):
+    id: int
+    user: UserModel
+    picnic: PicnicModel
 
     class Config:
         orm_mode = True
